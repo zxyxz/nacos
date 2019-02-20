@@ -361,4 +361,11 @@ public class Switch {
         dom.setAllDomNameCache(enable);
     }
 
+    public static String getServerStatus() {
+        return dom.serverStatus;
+    }
+
+    public static void setServerStatus(String serverStatus) {
+        dom.serverStatus = serverStatus;
+    }
 }

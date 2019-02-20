@@ -47,6 +47,8 @@ public class SwitchEntry {
     public static final String SEND_BEAT_ONLY = "sendBeatOnly";
     public static final String LIMITED_URL_MAP = "limitedUrlMap";
     public static final String ENABLE_STANDALONE = "enableStandalone";
+    public static final String SERVER_STATUS = "serverStatus";
+
     public static final int MIN_PUSH_CACHE_TIME_MIILIS = 10000;
     public static final int MIN_CACHE_TIME_MIILIS = 1000;
     public static final int MIN_DOM_SYNC_TIME_MIILIS = 5000;

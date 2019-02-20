@@ -1838,8 +1838,22 @@ public class ApiCommands {
             if (entry.equals(SwitchEntry.ENABLE_STANDALONE)) {
                 String enable = WebUtils.required(request, "enableStandalone");
 
-                if (!StringUtils.isNotEmpty(enable)) {
+                if (StringUtils.isNotBlank(enable)) {
                     Switch.setEnableStandalone(Boolean.parseBoolean(enable));
+                }
+
+                if (!debug) {
+                    Switch.save();
+                }
+
+                return "ok";
+            }
+
+            if (entry.equals(SwitchEntry.SERVER_STATUS)) {
+                String serverStatus = WebUtils.required(request, "serverStatus");
+
+                if (StringUtils.isNotBlank(serverStatus)) {
+                    Switch.setServerStatus(serverStatus);
                 }
 
                 if (!debug) {

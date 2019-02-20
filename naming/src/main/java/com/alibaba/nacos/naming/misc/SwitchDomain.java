@@ -103,6 +103,8 @@ public class SwitchDomain implements Domain, RaftListener {
 
     public boolean enableAuthentication = false;
 
+    public String serverStatus = "STARTING";
+
     public boolean isEnableAuthentication() {
         return enableAuthentication;
     }
@@ -221,6 +223,32 @@ public class SwitchDomain implements Domain, RaftListener {
     @Override
     public void update(Domain dom) {
 
+        SwitchDomain switchDomain = (SwitchDomain) dom;
+
+        this.masters = switchDomain.masters;
+        this.adWeightMap = switchDomain.adWeightMap;
+        this.defaultPushCacheMillis = switchDomain.defaultPushCacheMillis;
+        this.clientBeatInterval = switchDomain.clientBeatInterval;
+        this.defaultCacheMillis = switchDomain.defaultCacheMillis;
+        this.healthCheckEnabled = switchDomain.healthCheckEnabled;
+        this.distroEnabled = switchDomain.distroEnabled;
+        this.enableStandalone = switchDomain.enableStandalone;
+        this.checkTimes = switchDomain.checkTimes;
+        this.httpHealthParams = switchDomain.httpHealthParams;
+        this.tcpHealthParams = switchDomain.tcpHealthParams;
+        this.mysqlHealthParams = switchDomain.mysqlHealthParams;
+        this.incrementalList = switchDomain.incrementalList;
+        this.serverStatusSynchronizationPeriodMillis = switchDomain.serverStatusSynchronizationPeriodMillis;
+        this.disableAddIP = switchDomain.disableAddIP;
+        this.sendBeatOnly = switchDomain.sendBeatOnly;
+        this.limitedUrlMap = switchDomain.limitedUrlMap;
+        this.distroServerExpiredMillis = switchDomain.distroServerExpiredMillis;
+        this.pushGoVersion = switchDomain.pushGoVersion;
+        this.pushJavaVersion = switchDomain.pushJavaVersion;
+        this.pushPythonVersion = switchDomain.pushPythonVersion;
+        this.pushCVersion = switchDomain.pushCVersion;
+        this.enableAuthentication = switchDomain.enableAuthentication;
+        this.serverStatus = switchDomain.serverStatus;
     }
 
     @Override

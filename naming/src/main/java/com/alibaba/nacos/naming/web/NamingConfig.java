@@ -52,6 +52,17 @@ public class NamingConfig {
     }
 
     @Bean
+    public FilterRegistrationBean trafficReviseFilterRegistration() {
+        FilterRegistrationBean<TrafficReviseFilter> registration = new FilterRegistrationBean<>();
+        registration.setFilter(trafficReviseFilter());
+        registration.addUrlPatterns("/*");
+        registration.setName("trafficReviseFilter");
+        registration.setOrder(1);
+
+        return registration;
+    }
+
+    @Bean
     public Filter distroFilter() {
         return new DistroFilter();
     }
@@ -59,6 +70,11 @@ public class NamingConfig {
     @Bean
     public Filter authFilter() {
         return new AuthFilter();
+    }
+
+    @Bean
+    public TrafficReviseFilter trafficReviseFilter() {
+        return new TrafficReviseFilter();
     }
 
 }
