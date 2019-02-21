@@ -68,7 +68,7 @@ public class UtilsAndCommons {
 
     public static final String TAG_DOMAINS_DATA_ID = "com.alibaba.nacos.naming.domains.tag.meta";
 
-    public static final String SWITCH_DOMAIN_NAME = "00-00---000-VIPSRV_SWITCH_DOMAIN-000---00-00";
+    public static final String SWITCH_DOMAIN_NAME = "00-00---000-NACOS_SWITCH_DOMAIN-000---00-00";
 
     static public final String CIDR_REGEX = "[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}/[0-9]+";
 

@@ -103,6 +103,7 @@ public class SwitchDomain implements Domain, RaftListener {
 
     public boolean enableAuthentication = false;
 
+    @JSONField(serialize = false)
     public String serverStatus = "STARTING";
 
     public boolean isEnableAuthentication() {
@@ -178,7 +179,7 @@ public class SwitchDomain implements Domain, RaftListener {
 
     @Override
     public String getName() {
-        return "00-00---000-VIPSRV_SWITCH_DOMAIN-000---00-00";
+        return name;
     }
 
     @Override

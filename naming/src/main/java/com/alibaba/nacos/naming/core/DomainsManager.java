@@ -611,7 +611,8 @@ public class DomainsManager {
         final RaftListener raftListener = new RaftListener() {
             @Override
             public boolean interests(String key) {
-                return StringUtils.startsWith(key, UtilsAndCommons.DOMAINS_DATA_ID_PRE);
+                return StringUtils.startsWith(key, UtilsAndCommons.DOMAINS_DATA_ID_PRE)
+                    && !key.contains(UtilsAndCommons.SWITCH_DOMAIN_NAME);
             }
 
             @Override
