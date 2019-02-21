@@ -54,7 +54,7 @@ public class SwitchDomain implements Domain, RaftListener {
 
     public boolean healthCheckEnabled = true;
 
-    public String defaultHealthCheckMode = HealthCheckMode.client.name();
+    public String defaultHealthCheckMode = HealthCheckMode.server.name();
 
     public boolean distroEnabled = true;
 
