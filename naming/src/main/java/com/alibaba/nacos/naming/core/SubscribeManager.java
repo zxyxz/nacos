@@ -50,23 +50,23 @@ import java.util.stream.Collectors;
  */
 @Service
 public class SubscribeManager {
-    
+
     private static final String SUBSCRIBER_ON_SYNC_URL = "/service/subscribers";
-    
+
     @Autowired
     private PushService pushService;
-    
+
     @Autowired
     private ServerMemberManager memberManager;
-    
-    private List<Subscriber> getSubscribersFuzzy(String serviceName, String namespaceId) {
+
+    public List<Subscriber> getSubscribersFuzzy(String serviceName, String namespaceId) {
         return pushService.getClientsFuzzy(serviceName, namespaceId);
     }
-    
+
     private List<Subscriber> getSubscribers(String serviceName, String namespaceId) {
         return pushService.getClients(serviceName, namespaceId);
     }
-    
+
     /**
      * Get subscribers.
      *
@@ -83,11 +83,11 @@ public class SubscribeManager {
             if (memberManager.getServerList().size() <= 1) {
                 return getSubscribersFuzzy(serviceName, namespaceId);
             }
-            
+
             List<Subscriber> subscriberList = new ArrayList<Subscriber>();
             // try sync data from remote server:
             for (Member server : memberManager.allMembers()) {
-                
+
                 Map<String, String> paramValues = new HashMap<>(128);
                 paramValues.put(CommonParams.SERVICE_NAME, serviceName);
                 paramValues.put(CommonParams.NAMESPACE_ID, namespaceId);
@@ -96,12 +96,12 @@ public class SubscribeManager {
                     subscriberList.addAll(getSubscribersFuzzy(serviceName, namespaceId));
                     continue;
                 }
-                
+
                 HttpClient.HttpResult result = HttpClient.httpGet(
                         "http://" + server.getAddress() + ApplicationUtils.getContextPath()
                                 + UtilsAndCommons.NACOS_NAMING_CONTEXT + SUBSCRIBER_ON_SYNC_URL, new ArrayList<>(),
                         paramValues);
-                
+
                 if (HttpURLConnection.HTTP_OK == result.code) {
                     Subscribers subscribers = JacksonUtils.toObj(result.content, Subscribers.class);
                     subscriberList.addAll(subscribers.getSubscribers());
@@ -114,7 +114,7 @@ public class SubscribeManager {
             return getSubscribersFuzzy(serviceName, namespaceId);
         }
     }
-    
+
     public static <T> Predicate<T> distinctByKey(Function<? super T, Object> keyExtractor) {
         Map<Object, Boolean> seen = new ConcurrentHashMap<>(128);
         return object -> seen.putIfAbsent(keyExtractor.apply(object), Boolean.TRUE) == null;
