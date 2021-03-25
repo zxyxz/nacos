@@ -257,24 +257,27 @@ public class CatalogController {
     private List<ServicePubInfo> getServicePubInfos(Service service) {
         List<ServicePubInfo> pubInfos = Lists.newArrayList();
         for (com.alibaba.nacos.naming.core.Cluster cluster : service.getClusterMap().values()) {
-            cluster.getEphemeralInstances().forEach(instance -> {
-                ServicePubInfo pubInfo = new ServicePubInfo();
-                String appName = instance.getApp();
-                String ip = instance.getIp();
-                Map<String, String> metadata = instance.getMetadata();
-                pubInfo.setAppName(appName);
-                pubInfo.setInstanceId(instance.getClusterName());
-                pubInfo.setServiceIp(ip);
-                pubInfo.setServicePort(instance.getPort());
-                pubInfo.setProcessId(ip + ":" + instance.getPort());
-                String pubData = metadata.get("pubData");
-                pubInfo.setContent(pubData);
-                pubInfo.setDataId(instance.getServiceName().split("@@")[1]);
-                pubInfo.setWeight(Double.valueOf(instance.getWeight() * 10).intValue());
-                pubInfos.add(pubInfo);
-            });
+            cluster.getEphemeralInstances().forEach(instance -> addToPubInfos(pubInfos, instance));
+            cluster.getPersistentInstances().forEach(instance -> addToPubInfos(pubInfos, instance));
         }
         return pubInfos;
+    }
+
+    private void addToPubInfos(List<ServicePubInfo> pubInfos, Instance instance) {
+        ServicePubInfo pubInfo = new ServicePubInfo();
+        String appName = instance.getApp();
+        String ip = instance.getIp();
+        Map<String, String> metadata = instance.getMetadata();
+        pubInfo.setAppName(appName);
+        pubInfo.setInstanceId(instance.getClusterName());
+        pubInfo.setServiceIp(ip);
+        pubInfo.setServicePort(instance.getPort());
+        pubInfo.setProcessId(ip + ":" + instance.getPort());
+        String pubData = metadata.get("pubData");
+        pubInfo.setContent(pubData);
+        pubInfo.setDataId(instance.getServiceName().split("@@")[1]);
+        pubInfo.setWeight(Double.valueOf(instance.getWeight() * 10).intValue());
+        pubInfos.add(pubInfo);
     }
 
 
