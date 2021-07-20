@@ -21,20 +21,35 @@ import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.naming.CommonParams;
 import com.alibaba.nacos.api.naming.pojo.Cluster;
 import com.alibaba.nacos.api.naming.utils.NamingUtils;
+import com.alibaba.nacos.common.http.HttpClientBeanHolder;
+import com.alibaba.nacos.common.http.HttpRestResult;
+import com.alibaba.nacos.common.http.client.NacosRestTemplate;
+import com.alibaba.nacos.common.http.param.Header;
+import com.alibaba.nacos.common.http.param.Query;
 import com.alibaba.nacos.common.utils.JacksonUtils;
 import com.alibaba.nacos.core.auth.ActionTypes;
 import com.alibaba.nacos.core.auth.Secured;
+import com.alibaba.nacos.core.utils.ApplicationUtils;
+import com.alibaba.nacos.core.utils.BeanUtils;
+import com.alibaba.nacos.core.utils.InetUtils;
 import com.alibaba.nacos.core.utils.WebUtils;
 import com.alibaba.nacos.naming.core.*;
+import com.alibaba.nacos.naming.core.ClientInfoVO;
 import com.alibaba.nacos.naming.healthcheck.HealthCheckTask;
 import com.alibaba.nacos.naming.misc.UtilsAndCommons;
 import com.alibaba.nacos.naming.pojo.*;
+import com.alibaba.nacos.naming.push.PushService;
 import com.alibaba.nacos.naming.web.NamingResourceParser;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -43,6 +58,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 import javax.servlet.http.HttpServletRequest;
 import java.util.*;
+import java.util.concurrent.ConcurrentMap;
+import java.util.stream.Collectors;
 
 /**
  * Catalog controller.
@@ -53,11 +70,27 @@ import java.util.*;
 @RequestMapping(UtilsAndCommons.NACOS_NAMING_CONTEXT + "/catalog")
 public class CatalogController {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(CatalogController.class);
+
     @Autowired
     protected ServiceManager serviceManager;
 
     @Autowired
     private SubscribeManager subscribeManager;
+
+    @Autowired
+    private PushService pushService;
+
+    @Autowired
+    private DistroMapper distroMapper;
+
+    private static final NacosRestTemplate NACOS_REST_TEMPLATE;
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    static {
+        NACOS_REST_TEMPLATE = HttpClientBeanHolder.getNacosRestTemplate(LOGGER);
+    }
 
     /**
      * Get service detail.
@@ -71,7 +104,6 @@ public class CatalogController {
     @GetMapping("/service")
     public ObjectNode serviceDetail(@RequestParam(defaultValue = Constants.DEFAULT_NAMESPACE_ID) String namespaceId,
                                     String serviceName) throws NacosException {
-
         Service detailedService = serviceManager.getService(namespaceId, serviceName);
 
         if (detailedService == null) {
@@ -191,6 +223,34 @@ public class CatalogController {
     }
 
 
+    /**
+     * List subscriber instance.
+     *
+     * @return all subscriber instance
+     */
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.READ)
+    @GetMapping("/subInstances")
+    public ClientInfoVO listSubInstances() {
+        return getClientInfo();
+    }
+
+    private ClientInfoVO getClientInfo() {
+        ClientInfoVO clientInfoVO = new ClientInfoVO();
+        List<ClientInfos> clientInfos = Lists.newArrayList();
+        ConcurrentMap<String, ConcurrentMap<String, PushService.PushClient>> clientMap = pushService.getClientMap();
+        clientMap.forEach((serviceName, pubClients) -> {
+            ClientInfos infos = new ClientInfos();
+            infos.setServiceName(serviceName.split("##")[1]);
+            List<PushClient> pushClients = BeanUtils.copyList(PushClient.class, pubClients.values());
+
+            infos.setPushClients(Sets.newHashSet(pushClients));
+            clientInfos.add(infos);
+        });
+        clientInfoVO.setClientInfos(clientInfos);
+        return clientInfoVO;
+    }
+
+
     private List<ServiceInfoModel> listServiceByPage(Map<String, Service> serviceMap, int pageNo, int pageSize) {
         if (pageNo < 1) {
             pageNo = 1;
@@ -199,11 +259,13 @@ public class CatalogController {
             pageSize = 20;
         }
         List<ServiceInfoModel> infoModels = Lists.newArrayList();
+
+        //
+        Map<String, Set<PushClient>> pubClientMap = queryAllSubscribers();
+
         serviceMap.values().stream().skip((pageNo - 1) * pageSize).limit(pageSize).forEach(service -> {
             ServiceInfoModel infoModel = new ServiceInfoModel();
-            //
-            List<ServiceSubInfo> subInfos = getSubInfos(service);
-
+            List<ServiceSubInfo> subInfos = getSubscribers(service.getName(), pubClientMap);
             List<ServicePubInfo> pubInfos = getServicePubInfos(service);
 
             infoModel.setServiceName(service.getName().split("@@")[1]);
@@ -212,6 +274,74 @@ public class CatalogController {
             infoModels.add(infoModel);
         });
         return infoModels;
+    }
+
+    private Map<String, Set<PushClient>> queryAllSubscribers() {
+        // 查询出所有节点
+        List<String> healthyList = Lists.newArrayList(distroMapper.getHealthyList());
+        if (CollectionUtils.isEmpty(healthyList)) {
+            return Maps.newHashMap();
+        }
+        Map<String, Set<PushClient>> pubClientMap = Maps.newHashMap();
+        // 本节点的客户端信息添加到map里
+        ClientInfoVO clientInfo = getClientInfo();
+        if (CollectionUtils.isNotEmpty(clientInfo.getClientInfos())) {
+            addToMap(pubClientMap, clientInfo);
+        }
+
+        addRemoteSubInfoToMap(healthyList, pubClientMap);
+        return pubClientMap;
+    }
+
+    private void addRemoteSubInfoToMap(List<String> healthyList, Map<String, Set<PushClient>> pubClientMap) {
+        Integer port = ApplicationUtils.getProperty("server.port", Integer.class, 8848);
+        String localAddress = InetUtils.getSelfIp() + ":" + port;
+        healthyList.remove(localAddress);
+        for (String otherHealthyNode : healthyList) {
+            String url = "http://" + otherHealthyNode + "/nacos/v1/ns/catalog/subInstances";
+            try {
+                HttpRestResult<String> result = NACOS_REST_TEMPLATE.get(url, Header.EMPTY, Query.EMPTY, String.class);
+                ClientInfoVO clientInfoVO = mapper.readValue(result.getData(), ClientInfoVO.class);
+                if (CollectionUtils.isEmpty(clientInfoVO.getClientInfos())) {
+                    continue;
+                }
+                addToMap(pubClientMap, clientInfoVO);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void addToMap(Map<String, Set<PushClient>> pubClientMap, ClientInfoVO clientInfo) {
+        Map<String, Set<PushClient>> collect = clientInfo.getClientInfos().stream().collect(Collectors.toMap(ClientInfos::getServiceName, ClientInfos::getPushClients));
+        collect.forEach((serviceName, clients) -> {
+            Set<PushClient> pushClients = pubClientMap.get(serviceName);
+            if (CollectionUtils.isEmpty(pushClients)) {
+                pushClients = Sets.newHashSet(clients);
+                pubClientMap.put(serviceName, pushClients);
+            } else {
+                pushClients.addAll(clients);
+            }
+        });
+    }
+
+    private List<ServiceSubInfo> getSubscribers(String serviceName, Map<String, Set<PushClient>> pubClientMap) {
+        Set<PushClient> pushClients = pubClientMap.get(serviceName);
+        if (CollectionUtils.isEmpty(pushClients)) {
+            return Lists.newArrayList();
+        }
+        List<ServiceSubInfo> subInfos = Lists.newArrayList();
+        for (PushClient pushClient : pushClients) {
+            ServiceSubInfo subInfo = new ServiceSubInfo();
+            subInfo.setInstanceId(pushClient.getClusters());
+            subInfo.setAppName(pushClient.getApp());
+            String hostAddress = pushClient.getSocketAddr().getAddress().getHostAddress();
+            subInfo.setHostIp(hostAddress);
+            subInfo.setProcessId(hostAddress + ":" + pushClient.getSocketAddr().getPort());
+            subInfo.setDataId(pushClient.getServiceName().split("@@")[1]);
+            subInfos.add(subInfo);
+        }
+        return subInfos;
     }
 
     private List<ServiceSubInfo> getSubInfos(Service service) {
@@ -236,13 +366,14 @@ public class CatalogController {
         if (recentTime > 0) {
             modifiedTime = System.currentTimeMillis() - recentTime;
         }
+        Map<String, Set<PushClient>> pubClientMap = queryAllSubscribers();
         long finalModifiedTime = modifiedTime;
         serviceMap.values().stream()
             .filter(service -> service.getLastModifiedMillis() > finalModifiedTime
                 || service.getSubscriberModifiedMills() > finalModifiedTime)
             .forEach(service -> {
                 ServiceInfoModel infoModel = new ServiceInfoModel();
-                List<ServiceSubInfo> subInfos = getSubInfos(service);
+                List<ServiceSubInfo> subInfos = getSubscribers(service.getName(), pubClientMap);
 
                 List<ServicePubInfo> pubInfos = getServicePubInfos(service);
 

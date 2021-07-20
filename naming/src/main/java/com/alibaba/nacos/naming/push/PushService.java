@@ -25,6 +25,7 @@ import com.alibaba.nacos.naming.misc.Loggers;
 import com.alibaba.nacos.naming.misc.SwitchDomain;
 import com.alibaba.nacos.naming.misc.UtilsAndCommons;
 import com.alibaba.nacos.naming.pojo.Subscriber;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jackson.util.VersionUtil;
@@ -468,6 +469,7 @@ public class PushService implements InitializingBean, ApplicationContextAware, A
 
         private InetSocketAddress socketAddr;
 
+        @JsonIgnore
         private DataSource dataSource;
 
         private Map<String, String[]> params;
@@ -481,6 +483,9 @@ public class PushService implements InitializingBean, ApplicationContextAware, A
         }
 
         public long lastRefTime = System.currentTimeMillis();
+
+        public PushClient() {
+        }
 
         public PushClient(String namespaceId, String serviceName, String clusters, String agent,
                           InetSocketAddress socketAddr, DataSource dataSource, String tenant, String app) {
@@ -610,6 +615,10 @@ public class PushService implements InitializingBean, ApplicationContextAware, A
         cmd.put("data", client.getDataSource().getData(client));
 
         return cmd;
+    }
+
+    public ConcurrentMap<String, ConcurrentMap<String, PushClient>> getClientMap() {
+        return clientMap;
     }
 
     private static Receiver.AckEntry udpPush(Receiver.AckEntry ackEntry) {
