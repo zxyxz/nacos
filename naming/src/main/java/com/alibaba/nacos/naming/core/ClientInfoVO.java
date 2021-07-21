@@ -10,7 +10,7 @@ import java.util.List;
  * @version Subscribers.java, v 0.1 2021年07月20日 14:56 xuyang Exp $
  */
 public class ClientInfoVO {
-    private List<ClientInfos> clientInfos = new ArrayList<>();
+    private List<ClientInfos> clientInfos;
 
     public List<ClientInfos> getClientInfos() {
         return clientInfos;
@@ -18,5 +18,12 @@ public class ClientInfoVO {
 
     public void setClientInfos(List<ClientInfos> clientInfos) {
         this.clientInfos = clientInfos;
+    }
+
+    @Override
+    public String toString() {
+        return "ClientInfoVO{" +
+            "clientInfos=" + clientInfos +
+            '}';
     }
 }

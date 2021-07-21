@@ -8,6 +8,10 @@ import org.springframework.util.CollectionUtils;
 import java.beans.PropertyDescriptor;
 import java.util.*;
 
+/**
+ * @author xuyang
+ * @version BeanUtils.java, v 0.1 2021年07月20日 23:08 xuyang Exp $
+ */
 public class BeanUtils {
 
 
@@ -52,7 +56,9 @@ public class BeanUtils {
     Set<String> emptyNames = new HashSet<String>();
     for (PropertyDescriptor pd : pds) {
       Object srcValue = src.getPropertyValue(pd.getName());
-      if (srcValue == null) emptyNames.add(pd.getName());
+      if (srcValue == null) {
+          emptyNames.add(pd.getName());
+      }
     }
     String[] result = new String[emptyNames.size()];
     return emptyNames.toArray(result);
