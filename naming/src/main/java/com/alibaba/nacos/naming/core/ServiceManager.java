@@ -67,6 +67,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
+import static com.alibaba.nacos.api.common.Constants.NULL_STRING;
+
 /**
  * Core manager storing all services in Nacos.
  *
@@ -784,6 +786,13 @@ public class ServiceManager implements RecordListener<Service> {
         allInstance.forEach(instance -> {
             resultList.add(getAppName(instance));
         });
+        List<PushService.PushClient> collect = getAllPushClient(namespaceId, groupName, clusterName, "");
+        collect.forEach(pushClient -> {
+            String app = pushClient.getApp();
+            if(StringUtils.isNotBlank(app)){
+                resultList.add(app);
+            }
+        });
         resultMap.put("apps", resultList);
         return resultMap;
     }
@@ -840,7 +849,7 @@ public class ServiceManager implements RecordListener<Service> {
             allInstance.forEach(instance -> {
                 //根据instanceId,serviceName是否匹配即可判断
                 if (pushClient.getClusters().equals(instance.getClusterName()) && pushClient.getServiceName().equals(instance.getServiceName())) {
-                    result.add(new IpAppInfo(pushClient.getIp(), getAppName(instance)));
+                    result.add(new IpAppInfo(pushClient.getIp(), StringUtils.isBlank(pushClient.getApp())?getAppName(instance):pushClient.getApp()));
                 }
             });
         });
@@ -926,8 +935,8 @@ public class ServiceManager implements RecordListener<Service> {
         clusterList.forEach(cluster -> instanceList.addAll(cluster.allIPs()));
         //根据serviceName和AppName进行筛选
         return instanceList.stream()
-            .filter(instance -> StringUtils.isEmpty(serviceName) || (likely ? getServiceName(instance.getServiceName()).contains(serviceName) : getServiceName(instance.getServiceName()).equals(serviceName)))
-            .filter(instance -> StringUtils.isEmpty(appName) || appName.equals(getAppName(instance)))
+            .filter(instance -> StringUtils.isEmpty(serviceName) || NULL_STRING.equalsIgnoreCase(serviceName) || (likely ? getServiceName(instance.getServiceName()).contains(serviceName) : getServiceName(instance.getServiceName()).equals(serviceName)))
+            .filter(instance -> StringUtils.isEmpty(appName) || NULL_STRING.equalsIgnoreCase(appName) || appName.equals(getAppName(instance)))
             .collect(Collectors.toList());
     }
 
