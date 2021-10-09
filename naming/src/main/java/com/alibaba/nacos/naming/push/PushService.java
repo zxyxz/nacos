@@ -13,18 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package com.alibaba.nacos.naming.push;
 
-import com.alibaba.fastjson.JSON;
+import com.alibaba.nacos.api.naming.utils.NamingUtils;
+import com.alibaba.nacos.common.utils.JacksonUtils;
 import com.alibaba.nacos.naming.core.Service;
+import com.alibaba.nacos.naming.core.ServiceManager;
+import com.alibaba.nacos.naming.misc.GlobalExecutor;
 import com.alibaba.nacos.naming.misc.Loggers;
 import com.alibaba.nacos.naming.misc.SwitchDomain;
 import com.alibaba.nacos.naming.misc.UtilsAndCommons;
 import com.alibaba.nacos.naming.pojo.Subscriber;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jackson.util.VersionUtil;
 import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
@@ -37,18 +43,27 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.net.SocketException;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.GZIPOutputStream;
 
 /**
+ * Push service.
+ *
  * @author nacos
  */
 @Component
-public class PushService implements ApplicationContextAware, ApplicationListener<ServiceChangeEvent> {
+@SuppressWarnings("PMD.ThreadPoolCreationRule")
+public class PushService implements InitializingBean, ApplicationContextAware, ApplicationListener<ServiceChangeEvent> {
 
     @Autowired
     private SwitchDomain switchDomain;
@@ -59,44 +74,21 @@ public class PushService implements ApplicationContextAware, ApplicationListener
 
     private static final int MAX_RETRY_TIMES = 1;
 
-    private static volatile ConcurrentMap<String, Receiver.AckEntry> ackMap
-        = new ConcurrentHashMap<String, Receiver.AckEntry>();
+    private static volatile ConcurrentMap<String, Receiver.AckEntry> ackMap = new ConcurrentHashMap<>();
 
-    private static ConcurrentMap<String, ConcurrentMap<String, PushClient>> clientMap
-        = new ConcurrentHashMap<String, ConcurrentMap<String, PushClient>>();
+    private static ConcurrentMap<String, ConcurrentMap<String, PushClient>> clientMap = new ConcurrentHashMap<>();
 
-    private static volatile ConcurrentHashMap<String, Long> udpSendTimeMap = new ConcurrentHashMap<String, Long>();
+    private static volatile ConcurrentMap<String, Long> udpSendTimeMap = new ConcurrentHashMap<>();
 
-    public static volatile ConcurrentHashMap<String, Long> pushCostMap = new ConcurrentHashMap<String, Long>();
+    public static volatile ConcurrentMap<String, Long> pushCostMap = new ConcurrentHashMap<>();
 
     private static int totalPush = 0;
 
     private static int failedPush = 0;
 
-    private static ConcurrentHashMap<String, Long> lastPushMillisMap = new ConcurrentHashMap<>();
-
     private static DatagramSocket udpSocket;
 
-    private static Map<String, Future> futureMap = new ConcurrentHashMap<>();
-    private static ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-        @Override
-        public Thread newThread(Runnable r) {
-            Thread t = new Thread(r);
-            t.setDaemon(true);
-            t.setName("com.alibaba.nacos.naming.push.retransmitter");
-            return t;
-        }
-    });
-
-    private static ScheduledExecutorService udpSender = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-        @Override
-        public Thread newThread(Runnable r) {
-            Thread t = new Thread(r);
-            t.setDaemon(true);
-            t.setName("com.alibaba.nacos.naming.push.udpSender");
-            return t;
-        }
-    });
+    private static ConcurrentMap<String, Future> futureMap = new ConcurrentHashMap<>();
 
     static {
         try {
@@ -108,17 +100,6 @@ public class PushService implements ApplicationContextAware, ApplicationListener
             inThread.setDaemon(true);
             inThread.setName("com.alibaba.nacos.naming.push.receiver");
             inThread.start();
-
-            executorService.scheduleWithFixedDelay(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        removeClientIfZombie();
-                    } catch (Throwable e) {
-                        Loggers.PUSH.warn("[NACOS-PUSH] failed to remove client zombie");
-                    }
-                }
-            }, 0, 20, TimeUnit.SECONDS);
 
         } catch (SocketException e) {
             Loggers.SRV_LOG.error("[NACOS-PUSH] failed to init push service");
@@ -136,61 +117,60 @@ public class PushService implements ApplicationContextAware, ApplicationListener
         String serviceName = service.getName();
         String namespaceId = service.getNamespaceId();
 
-        Future future = udpSender.schedule(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    Loggers.PUSH.info(serviceName + " is changed, add it to push queue.");
-                    ConcurrentMap<String, PushClient> clients = clientMap.get(UtilsAndCommons.assembleFullServiceName(namespaceId, serviceName));
-                    if (MapUtils.isEmpty(clients)) {
-                        return;
-                    }
-
-                    Map<String, Object> cache = new HashMap<>(16);
-                    long lastRefTime = System.nanoTime();
-                    for (PushClient client : clients.values()) {
-                        if (client.zombie()) {
-                            Loggers.PUSH.debug("client is zombie: " + client.toString());
-                            clients.remove(client.toString());
-                            Loggers.PUSH.debug("client is zombie: " + client.toString());
-                            continue;
-                        }
-
-                        Receiver.AckEntry ackEntry;
-                        Loggers.PUSH.debug("push serviceName: {} to client: {}", serviceName, client.toString());
-                        String key = getPushCacheKey(serviceName, client.getIp(), client.getAgent());
-                        byte[] compressData = null;
-                        Map<String, Object> data = null;
-                        if (switchDomain.getDefaultPushCacheMillis() >= 20000 && cache.containsKey(key)) {
-                            org.javatuples.Pair pair = (org.javatuples.Pair) cache.get(key);
-                            compressData = (byte[]) (pair.getValue0());
-                            data = (Map<String, Object>) pair.getValue1();
-
-                            Loggers.PUSH.debug("[PUSH-CACHE] cache hit: {}:{}", serviceName, client.getAddrStr());
-                        }
-
-                        if (compressData != null) {
-                            ackEntry = prepareAckEntry(client, compressData, data, lastRefTime);
-                        } else {
-                            ackEntry = prepareAckEntry(client, prepareHostsData(client), lastRefTime);
-                            if (ackEntry != null) {
-                                cache.put(key, new org.javatuples.Pair<>(ackEntry.origin.getData(), ackEntry.data));
-                            }
-                        }
-
-                        Loggers.PUSH.info("serviceName: {} changed, schedule push for: {}, agent: {}, key: {}",
-                            client.getServiceName(), client.getAddrStr(), client.getAgent(), (ackEntry == null ? null : ackEntry.key));
-
-                        udpPush(ackEntry);
-                    }
-                } catch (Exception e) {
-                    Loggers.PUSH.error("[NACOS-PUSH] failed to push serviceName: {} to client, error: {}", serviceName, e);
-
-                } finally {
-                    futureMap.remove(UtilsAndCommons.assembleFullServiceName(namespaceId, serviceName));
+        Future future = GlobalExecutor.scheduleUdpSender(() -> {
+            try {
+                Loggers.PUSH.info(serviceName + " is changed, add it to push queue.");
+                ConcurrentMap<String, PushClient> clients = clientMap
+                    .get(UtilsAndCommons.assembleFullServiceName(namespaceId, serviceName));
+                if (MapUtils.isEmpty(clients)) {
+                    return;
                 }
 
+                Map<String, Object> cache = new HashMap<>(16);
+                long lastRefTime = System.nanoTime();
+                for (PushClient client : clients.values()) {
+                    if (client.zombie()) {
+                        Loggers.PUSH.debug("client is zombie: " + client.toString());
+                        clients.remove(client.toString());
+                        Loggers.PUSH.debug("client is zombie: " + client.toString());
+                        continue;
+                    }
+
+                    Receiver.AckEntry ackEntry;
+                    Loggers.PUSH.debug("push serviceName: {} to client: {}", serviceName, client.toString());
+                    String key = getPushCacheKey(serviceName, client.getIp(), client.getAgent());
+                    byte[] compressData = null;
+                    Map<String, Object> data = null;
+                    if (switchDomain.getDefaultPushCacheMillis() >= 20000 && cache.containsKey(key)) {
+                        org.javatuples.Pair pair = (org.javatuples.Pair) cache.get(key);
+                        compressData = (byte[]) (pair.getValue0());
+                        data = (Map<String, Object>) pair.getValue1();
+
+                        Loggers.PUSH.debug("[PUSH-CACHE] cache hit: {}:{}", serviceName, client.getAddrStr());
+                    }
+
+                    if (compressData != null) {
+                        ackEntry = prepareAckEntry(client, compressData, data, lastRefTime);
+                    } else {
+                        ackEntry = prepareAckEntry(client, prepareHostsData(client), lastRefTime);
+                        if (ackEntry != null) {
+                            cache.put(key, new org.javatuples.Pair<>(ackEntry.origin.getData(), ackEntry.data));
+                        }
+                    }
+
+                    Loggers.PUSH.info("serviceName: {} changed, schedule push for: {}, agent: {}, key: {}",
+                        client.getServiceName(), client.getAddrStr(), client.getAgent(),
+                        (ackEntry == null ? null : ackEntry.key));
+
+                    udpPush(ackEntry);
+                }
+            } catch (Exception e) {
+                Loggers.PUSH.error("[NACOS-PUSH] failed to push serviceName: {} to client, error: {}", serviceName, e);
+
+            } finally {
+                futureMap.remove(UtilsAndCommons.assembleFullServiceName(namespaceId, serviceName));
             }
+
         }, 1000, TimeUnit.MILLISECONDS);
 
         futureMap.put(UtilsAndCommons.assembleFullServiceName(namespaceId, serviceName), future);
@@ -205,33 +185,37 @@ public class PushService implements ApplicationContextAware, ApplicationListener
         PushService.totalPush = totalPush;
     }
 
-    public void addClient(String namespaceId,
-                          String serviceName,
-                          String clusters,
-                          String agent,
-                          InetSocketAddress socketAddr,
-                          DataSource dataSource,
-                          String tenant,
-                          String app) {
+    /**
+     * Add push target client.
+     *
+     * @param namespaceId namespace id
+     * @param serviceName service name
+     * @param clusters    cluster
+     * @param agent       agent information
+     * @param socketAddr  client address
+     * @param dataSource  datasource of push data
+     * @param tenant      tenant
+     * @param app         app
+     */
+    public void addClient(String namespaceId, String serviceName, String clusters, String agent,
+                          InetSocketAddress socketAddr, DataSource dataSource, String tenant, String app) {
 
-        PushClient client = new PushClient(namespaceId,
-            serviceName,
-            clusters,
-            agent,
-            socketAddr,
-            dataSource,
-            tenant,
+        PushClient client = new PushClient(namespaceId, serviceName, clusters, agent, socketAddr, dataSource, tenant,
             app);
         addClient(client);
     }
 
-    public static void addClient(PushClient client) {
+    /**
+     * Add push target client.
+     *
+     * @param client push target client
+     */
+    public void addClient(PushClient client) {
         // client is stored by key 'serviceName' because notify event is driven by serviceName change
         String serviceKey = UtilsAndCommons.assembleFullServiceName(client.getNamespaceId(), client.getServiceName());
-        ConcurrentMap<String, PushClient> clients =
-            clientMap.get(serviceKey);
+        ConcurrentMap<String, PushClient> clients = clientMap.get(serviceKey);
         if (clients == null) {
-            clientMap.putIfAbsent(serviceKey, new ConcurrentHashMap<String, PushClient>(1024));
+            clientMap.putIfAbsent(serviceKey, new ConcurrentHashMap<>(1024));
             clients = clientMap.get(serviceKey);
         }
 
@@ -242,25 +226,70 @@ public class PushService implements ApplicationContextAware, ApplicationListener
             PushClient res = clients.putIfAbsent(client.toString(), client);
             if (res != null) {
                 Loggers.PUSH.warn("client: {} already associated with key {}", res.getAddrStr(), res.toString());
+            } else {
+                Service service = serviceManager.getService(client.namespaceId, client.serviceName);
+                if (null != service) {
+                    service.setSubscriberModifiedMills(System.currentTimeMillis());
+                }
             }
             Loggers.PUSH.debug("client: {} added for serviceName: {}", client.getAddrStr(), client.getServiceName());
         }
     }
 
+    /**
+     * Get push target client(subscriber).
+     *
+     * @param serviceName service name
+     * @param namespaceId namespace id
+     * @return list of subsriber
+     */
     public List<Subscriber> getClients(String serviceName, String namespaceId) {
         String serviceKey = UtilsAndCommons.assembleFullServiceName(namespaceId, serviceName);
         ConcurrentMap<String, PushClient> clientConcurrentMap = clientMap.get(serviceKey);
         if (Objects.isNull(clientConcurrentMap)) {
             return null;
         }
-        List<Subscriber> clients = new ArrayList<Subscriber>();
+        List<Subscriber> clients = new ArrayList<>();
         clientConcurrentMap.forEach((key, client) -> {
-            clients.add(new Subscriber(client.getAddrStr(), client.getAgent(), client.getApp(), client.getIp(), namespaceId, serviceName));
+            clients.add(
+                new Subscriber(client.getAddrStr(), client.getAgent(), client.getApp(), client.getIp(), namespaceId,
+                    serviceName));
         });
         return clients;
     }
 
-    public static void removeClientIfZombie() {
+    /**
+     * fuzzy search subscriber.
+     *
+     * @param serviceName service name
+     * @param namespaceId namespace id
+     * @return list of subscriber
+     */
+    public List<Subscriber> getClientsFuzzy(String serviceName, String namespaceId) {
+        List<Subscriber> clients = new ArrayList<>();
+        clientMap.forEach((outKey, clientConcurrentMap) -> {
+            //get groupedName from key
+            String serviceFullName = outKey.split(UtilsAndCommons.NAMESPACE_SERVICE_CONNECTOR)[1];
+            //get groupName
+            String groupName = NamingUtils.getGroupName(serviceFullName);
+            //get serviceName
+            String name = NamingUtils.getServiceName(serviceFullName);
+            //fuzzy match
+            if (outKey.startsWith(namespaceId) && name.indexOf(NamingUtils.getServiceName(serviceName)) >= 0
+                && groupName.indexOf(NamingUtils.getGroupName(serviceName)) >= 0) {
+                clientConcurrentMap.forEach((key, client) -> {
+                    clients.add(new Subscriber(client.getAddrStr(), client.getAgent(), client.getApp(), client.getIp(),
+                        namespaceId, serviceFullName, client.clusters, String.valueOf(client.getSocketAddr().getPort())));
+                });
+            }
+        });
+        return clients;
+    }
+
+    @Autowired
+    private ServiceManager serviceManager;
+
+    private void removeClientIfZombie() {
 
         int size = 0;
         for (Map.Entry<String, ConcurrentMap<String, PushClient>> entry : clientMap.entrySet()) {
@@ -269,35 +298,78 @@ public class PushService implements ApplicationContextAware, ApplicationListener
                 PushClient client = entry1.getValue();
                 if (client.zombie()) {
                     clientConcurrentMap.remove(entry1.getKey());
+                    Service service = serviceManager.getService(client.namespaceId, client.serviceName);
+                    if (null != service) {
+                        service.setSubscriberModifiedMills(System.currentTimeMillis());
+                    }
+                    Loggers.PUSH.warn("[NACOS-PUSH] current client is zombie. ip: {}", client.socketAddr.getHostString());
                 }
+
             }
 
             size += clientConcurrentMap.size();
         }
 
-        Loggers.PUSH.info("[NACOS-PUSH] clientMap size: {}", size);
+        if (Loggers.PUSH.isDebugEnabled()) {
+            Loggers.PUSH.debug("[NACOS-PUSH] clientMap size: {}", size);
+        }
 
+    }
+
+    public ServiceManager getServiceManager() {
+        return applicationContext.getBean(ServiceManager.class);
+    }
+
+
+    private static Receiver.AckEntry prepareAckEntry(PushClient client, Map<String, Object> data, long lastRefTime) {
+        if (MapUtils.isEmpty(data)) {
+            Loggers.PUSH.error("[NACOS-PUSH] pushing empty data for client is not allowed: {}", client);
+            return null;
+        }
+
+        data.put("lastRefTime", lastRefTime);
+
+        // we apply lastRefTime as sequence num for further ack
+        String key = getAckKey(client.getSocketAddr().getAddress().getHostAddress(), client.getSocketAddr().getPort(),
+            lastRefTime);
+
+        String dataStr = JacksonUtils.toJson(data);
+
+        try {
+            byte[] dataBytes = dataStr.getBytes(StandardCharsets.UTF_8);
+            dataBytes = compressIfNecessary(dataBytes);
+
+            DatagramPacket packet = new DatagramPacket(dataBytes, dataBytes.length, client.socketAddr);
+
+            // we must store the key be fore send, otherwise there will be a chance the
+            // ack returns before we put in
+            Receiver.AckEntry ackEntry = new Receiver.AckEntry(key, packet);
+            ackEntry.data = data;
+
+            return ackEntry;
+        } catch (Exception e) {
+            Loggers.PUSH.error("[NACOS-PUSH] failed to prepare data: {} to client: {}, error: {}", data,
+                client.getSocketAddr(), e);
+            return null;
+        }
     }
 
     private static Receiver.AckEntry prepareAckEntry(PushClient client, byte[] dataBytes, Map<String, Object> data,
                                                      long lastRefTime) {
-        String key = getACKKey(client.getSocketAddr().getAddress().getHostAddress(),
-            client.getSocketAddr().getPort(),
+        String key = getAckKey(client.getSocketAddr().getAddress().getHostAddress(), client.getSocketAddr().getPort(),
             lastRefTime);
         DatagramPacket packet = null;
         try {
             packet = new DatagramPacket(dataBytes, dataBytes.length, client.socketAddr);
             Receiver.AckEntry ackEntry = new Receiver.AckEntry(key, packet);
-            ackEntry.data = data;
-
             // we must store the key be fore send, otherwise there will be a chance the
             // ack returns before we put in
             ackEntry.data = data;
 
             return ackEntry;
         } catch (Exception e) {
-            Loggers.PUSH.error("[NACOS-PUSH] failed to prepare data: {} to client: {}, error: {}",
-                data, client.getSocketAddr(), e);
+            Loggers.PUSH.error("[NACOS-PUSH] failed to prepare data: {} to client: {}, error: {}", data,
+                client.getSocketAddr(), e);
         }
 
         return null;
@@ -307,15 +379,27 @@ public class PushService implements ApplicationContextAware, ApplicationListener
         return serviceName + UtilsAndCommons.CACHE_KEY_SPLITER + agent;
     }
 
+    /**
+     * Service changed.
+     *
+     * @param service service
+     */
     public void serviceChanged(Service service) {
         // merge some change events to reduce the push frequency:
-        if (futureMap.containsKey(UtilsAndCommons.assembleFullServiceName(service.getNamespaceId(), service.getName()))) {
+        if (futureMap
+            .containsKey(UtilsAndCommons.assembleFullServiceName(service.getNamespaceId(), service.getName()))) {
             return;
         }
 
         this.applicationContext.publishEvent(new ServiceChangeEvent(this, service));
     }
 
+    /**
+     * Judge whether this agent is supported to push.
+     *
+     * @param agent agent information
+     * @return true if agent can be pushed, otherwise false
+     */
     public boolean canEnablePush(String agent) {
 
         if (!switchDomain.isPushEnabled()) {
@@ -353,20 +437,41 @@ public class PushService implements ApplicationContextAware, ApplicationListener
         PushService.failedPush = failedPush;
     }
 
-
     public static void resetPushState() {
         ackMap.clear();
     }
 
+    @Override
+    public void afterPropertiesSet() throws Exception {
+
+        GlobalExecutor.scheduleRetransmitter(() -> {
+            try {
+                removeClientIfZombie();
+            } catch (Throwable e) {
+                Loggers.PUSH.warn("[NACOS-PUSH] failed to remove client zombie");
+            }
+        }, 0, 20, TimeUnit.SECONDS);
+    }
+
     public class PushClient {
+
         private String namespaceId;
+
         private String serviceName;
+
         private String clusters;
+
         private String agent;
+
         private String tenant;
+
         private String app;
+
         private InetSocketAddress socketAddr;
+
+        @JsonIgnore
         private DataSource dataSource;
+
         private Map<String, String[]> params;
 
         public Map<String, String[]> getParams() {
@@ -379,14 +484,11 @@ public class PushService implements ApplicationContextAware, ApplicationListener
 
         public long lastRefTime = System.currentTimeMillis();
 
-        public PushClient(String namespaceId,
-                          String serviceName,
-                          String clusters,
-                          String agent,
-                          InetSocketAddress socketAddr,
-                          DataSource dataSource,
-                          String tenant,
-                          String app) {
+        public PushClient() {
+        }
+
+        public PushClient(String namespaceId, String serviceName, String clusters, String agent,
+                          InetSocketAddress socketAddr, DataSource dataSource, String tenant, String app) {
             this.namespaceId = namespaceId;
             this.serviceName = serviceName;
             this.clusters = clusters;
@@ -401,21 +503,16 @@ public class PushService implements ApplicationContextAware, ApplicationListener
             return dataSource;
         }
 
-        public PushClient(InetSocketAddress socketAddr) {
-            this.socketAddr = socketAddr;
-        }
-
         public boolean zombie() {
             return System.currentTimeMillis() - lastRefTime > switchDomain.getPushCacheMillis(serviceName);
         }
 
         @Override
         public String toString() {
-            return "serviceName: " + serviceName
-                + ", clusters: " + clusters
-                + ", ip: " + socketAddr.getAddress().getHostAddress()
-                + ", port: " + socketAddr.getPort()
-                + ", agent: " + agent;
+            StringBuilder sb = new StringBuilder();
+            sb.append("serviceName: ").append(serviceName).append(", clusters: ").append(clusters).append(", address: ")
+                .append(socketAddr).append(", agent: ").append(agent);
+            return sb.toString();
         }
 
         public String getAgent() {
@@ -443,7 +540,8 @@ public class PushService implements ApplicationContextAware, ApplicationListener
 
             PushClient other = (PushClient) obj;
 
-            return serviceName.equals(other.serviceName) && clusters.equals(other.clusters) && socketAddr.equals(other.socketAddr);
+            return serviceName.equals(other.serviceName) && clusters.equals(other.clusters) && socketAddr
+                .equals(other.socketAddr);
         }
 
         public String getClusters() {
@@ -493,6 +591,7 @@ public class PushService implements ApplicationContextAware, ApplicationListener
         public void refresh() {
             lastRefTime = System.currentTimeMillis();
         }
+
     }
 
     private static byte[] compressIfNecessary(byte[] dataBytes) throws IOException {
@@ -518,38 +617,8 @@ public class PushService implements ApplicationContextAware, ApplicationListener
         return cmd;
     }
 
-    private static Receiver.AckEntry prepareAckEntry(PushClient client, Map<String, Object> data, long lastRefTime) {
-        if (MapUtils.isEmpty(data)) {
-            Loggers.PUSH.error("[NACOS-PUSH] pushing empty data for client is not allowed: {}", client);
-            return null;
-        }
-
-        data.put("lastRefTime", lastRefTime);
-
-        // we apply lastRefTime as sequence num for further ack
-        String key = getACKKey(client.getSocketAddr().getAddress().getHostAddress(),
-            client.getSocketAddr().getPort(),
-            lastRefTime);
-
-        String dataStr = JSON.toJSONString(data);
-
-        try {
-            byte[] dataBytes = dataStr.getBytes(StandardCharsets.UTF_8);
-            dataBytes = compressIfNecessary(dataBytes);
-
-            DatagramPacket packet = new DatagramPacket(dataBytes, dataBytes.length, client.socketAddr);
-
-            // we must store the key be fore send, otherwise there will be a chance the
-            // ack returns before we put in
-            Receiver.AckEntry ackEntry = new Receiver.AckEntry(key, packet);
-            ackEntry.data = data;
-
-            return ackEntry;
-        } catch (Exception e) {
-            Loggers.PUSH.error("[NACOS-PUSH] failed to prepare data: {} to client: {}, error: {}",
-                data, client.getSocketAddr(), e);
-            return null;
-        }
+    public ConcurrentMap<String, ConcurrentMap<String, PushClient>> getClientMap() {
+        return clientMap;
     }
 
     private static Receiver.AckEntry udpPush(Receiver.AckEntry ackEntry) {
@@ -578,13 +647,13 @@ public class PushService implements ApplicationContextAware, ApplicationListener
 
             ackEntry.increaseRetryTime();
 
-            executorService.schedule(new Retransmitter(ackEntry), TimeUnit.NANOSECONDS.toMillis(ACK_TIMEOUT_NANOS),
-                TimeUnit.MILLISECONDS);
+            GlobalExecutor.scheduleRetransmitter(new Retransmitter(ackEntry),
+                TimeUnit.NANOSECONDS.toMillis(ACK_TIMEOUT_NANOS), TimeUnit.MILLISECONDS);
 
             return ackEntry;
         } catch (Exception e) {
-            Loggers.PUSH.error("[NACOS-PUSH] failed to push data: {} to client: {}, error: {}",
-                ackEntry.data, ackEntry.origin.getAddress().getHostAddress(), e);
+            Loggers.PUSH.error("[NACOS-PUSH] failed to push data: {} to client: {}, error: {}", ackEntry.data,
+                ackEntry.origin.getAddress().getHostAddress(), e);
             ackMap.remove(ackEntry.key);
             udpSendTimeMap.remove(ackEntry.key);
             failedPush += 1;
@@ -593,11 +662,12 @@ public class PushService implements ApplicationContextAware, ApplicationListener
         }
     }
 
-    private static String getACKKey(String host, int port, long lastRefTime) {
+    private static String getAckKey(String host, int port, long lastRefTime) {
         return StringUtils.strip(host) + "," + port + "," + lastRefTime;
     }
 
     public static class Retransmitter implements Runnable {
+
         Receiver.AckEntry ackEntry;
 
         public Retransmitter(Receiver.AckEntry ackEntry) {
@@ -614,6 +684,7 @@ public class PushService implements ApplicationContextAware, ApplicationListener
     }
 
     public static class Receiver implements Runnable {
+
         @Override
         public void run() {
             while (true) {
@@ -623,8 +694,8 @@ public class PushService implements ApplicationContextAware, ApplicationListener
                 try {
                     udpSocket.receive(packet);
 
-                    String json = new String(packet.getData(), 0, packet.getLength(), Charset.forName("UTF-8")).trim();
-                    AckPacket ackPacket = JSON.parseObject(json, AckPacket.class);
+                    String json = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8).trim();
+                    AckPacket ackPacket = JacksonUtils.toObj(json, AckPacket.class);
 
                     InetSocketAddress socketAddress = (InetSocketAddress) packet.getSocketAddress();
                     String ip = socketAddress.getAddress().getHostAddress();
@@ -634,17 +705,18 @@ public class PushService implements ApplicationContextAware, ApplicationListener
                         Loggers.PUSH.warn("ack takes too long from {} ack json: {}", packet.getSocketAddress(), json);
                     }
 
-                    String ackKey = getACKKey(ip, port, ackPacket.lastRefTime);
+                    String ackKey = getAckKey(ip, port, ackPacket.lastRefTime);
                     AckEntry ackEntry = ackMap.remove(ackKey);
                     if (ackEntry == null) {
-                        throw new IllegalStateException("unable to find ackEntry for key: " + ackKey
-                            + ", ack json: " + json);
+                        throw new IllegalStateException(
+                            "unable to find ackEntry for key: " + ackKey + ", ack json: " + json);
                     }
 
                     long pushCost = System.currentTimeMillis() - udpSendTimeMap.get(ackKey);
 
-                    Loggers.PUSH.info("received ack: {} from: {}:, cost: {} ms, unacked: {}, total push: {}",
-                        json, ip, port, pushCost, ackMap.size(), totalPush);
+                    Loggers.PUSH
+                        .info("received ack: {} from: {}:{}, cost: {} ms, unacked: {}, total push: {}", json, ip,
+                            port, pushCost, ackMap.size(), totalPush);
 
                     pushCostMap.put(ackKey, pushCost);
 
@@ -672,18 +744,22 @@ public class PushService implements ApplicationContextAware, ApplicationListener
             }
 
             public String key;
+
             public DatagramPacket origin;
+
             private AtomicInteger retryTimes = new AtomicInteger(0);
+
             public Map<String, Object> data;
         }
 
         public static class AckPacket {
+
             public String type;
+
             public long lastRefTime;
 
             public String data;
         }
     }
-
 
 }

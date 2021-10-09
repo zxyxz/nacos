@@ -13,69 +13,111 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package com.alibaba.nacos.naming.controllers;
 
-import com.alibaba.fastjson.JSONArray;
-import com.alibaba.fastjson.JSONObject;
 import com.alibaba.nacos.api.common.Constants;
+import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.naming.CommonParams;
 import com.alibaba.nacos.api.naming.pojo.Cluster;
 import com.alibaba.nacos.api.naming.utils.NamingUtils;
+import com.alibaba.nacos.common.http.HttpClientBeanHolder;
+import com.alibaba.nacos.common.http.HttpRestResult;
+import com.alibaba.nacos.common.http.client.NacosRestTemplate;
+import com.alibaba.nacos.common.http.param.Header;
+import com.alibaba.nacos.common.http.param.Query;
+import com.alibaba.nacos.common.utils.JacksonUtils;
+import com.alibaba.nacos.core.auth.ActionTypes;
+import com.alibaba.nacos.core.auth.Secured;
+import com.alibaba.nacos.core.utils.ApplicationUtils;
+import com.alibaba.nacos.core.utils.BeanUtils;
+import com.alibaba.nacos.core.utils.InetUtils;
 import com.alibaba.nacos.core.utils.WebUtils;
-import com.alibaba.nacos.naming.core.Instance;
-import com.alibaba.nacos.naming.core.Service;
-import com.alibaba.nacos.naming.core.ServiceManager;
-import com.alibaba.nacos.naming.exception.NacosException;
+import com.alibaba.nacos.naming.core.*;
+import com.alibaba.nacos.naming.core.ClientInfoVO;
 import com.alibaba.nacos.naming.healthcheck.HealthCheckTask;
 import com.alibaba.nacos.naming.misc.UtilsAndCommons;
-import com.alibaba.nacos.naming.pojo.ClusterInfo;
-import com.alibaba.nacos.naming.pojo.IpAddressInfo;
-import com.alibaba.nacos.naming.pojo.ServiceDetailInfo;
-import com.alibaba.nacos.naming.pojo.ServiceView;
+import com.alibaba.nacos.naming.pojo.*;
+import com.alibaba.nacos.naming.push.PushService;
+import com.alibaba.nacos.naming.web.NamingResourceParser;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import org.apache.commons.collections.CollectionUtils;
-import org.apache.commons.collections.map.HashedMap;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.servlet.http.HttpServletRequest;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.ConcurrentMap;
+import java.util.stream.Collectors;
 
 /**
+ * Catalog controller.
+ *
  * @author nkorange
  */
 @RestController
 @RequestMapping(UtilsAndCommons.NACOS_NAMING_CONTEXT + "/catalog")
 public class CatalogController {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(CatalogController.class);
+
     @Autowired
     protected ServiceManager serviceManager;
 
-    @RequestMapping(value = "/service")
-    public JSONObject serviceDetail(HttpServletRequest request) throws Exception {
-        String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID,
-            Constants.DEFAULT_NAMESPACE_ID);
-        String serviceName = WebUtils.required(request, CommonParams.SERVICE_NAME);
+    @Autowired
+    private SubscribeManager subscribeManager;
+
+    @Autowired
+    private PushService pushService;
+
+    @Autowired
+    private DistroMapper distroMapper;
+
+    private static final NacosRestTemplate NACOS_REST_TEMPLATE;
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    static {
+        NACOS_REST_TEMPLATE = HttpClientBeanHolder.getNacosRestTemplate(LOGGER);
+    }
+
+    /**
+     * Get service detail.
+     *
+     * @param namespaceId namespace id
+     * @param serviceName service name
+     * @return service detail information
+     * @throws NacosException nacos exception
+     */
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.READ)
+    @GetMapping("/service")
+    public ObjectNode serviceDetail(@RequestParam(defaultValue = Constants.DEFAULT_NAMESPACE_ID) String namespaceId,
+                                    String serviceName) throws NacosException {
         Service detailedService = serviceManager.getService(namespaceId, serviceName);
+
         if (detailedService == null) {
             throw new NacosException(NacosException.NOT_FOUND, "service " + serviceName + " is not found!");
         }
-
-        JSONObject detailView = new JSONObject();
-
-        JSONObject serviceObject = new JSONObject();
+        ObjectNode serviceObject = JacksonUtils.createEmptyJsonNode();
         serviceObject.put("name", NamingUtils.getServiceName(serviceName));
         serviceObject.put("protectThreshold", detailedService.getProtectThreshold());
         serviceObject.put("groupName", NamingUtils.getGroupName(serviceName));
-        serviceObject.put("selector", detailedService.getSelector());
-        serviceObject.put("metadata", detailedService.getMetadata());
+        serviceObject.replace("selector", JacksonUtils.transferToJsonNode(detailedService.getSelector()));
+        serviceObject.replace("metadata", JacksonUtils.transferToJsonNode(detailedService.getMetadata()));
 
-        detailView.put("service", serviceObject);
+        ObjectNode detailView = JacksonUtils.createEmptyJsonNode();
+        detailView.replace("service", serviceObject);
 
         List<Cluster> clusters = new ArrayList<>();
 
@@ -91,20 +133,28 @@ public class CatalogController {
             clusters.add(clusterView);
         }
 
-        detailView.put("clusters", clusters);
+        detailView.replace("clusters", JacksonUtils.transferToJsonNode(clusters));
 
         return detailView;
     }
 
-    @RequestMapping(value = "/instances")
-    public JSONObject instanceList(HttpServletRequest request) throws Exception {
 
-        String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID,
-            Constants.DEFAULT_NAMESPACE_ID);
-        String serviceName = WebUtils.required(request, CommonParams.SERVICE_NAME);
-        String clusterName = WebUtils.required(request, CommonParams.CLUSTER_NAME);
-        int page = Integer.parseInt(WebUtils.required(request, "pageNo"));
-        int pageSize = Integer.parseInt(WebUtils.required(request, "pageSize"));
+    /**
+     * List instances of special service.
+     *
+     * @param namespaceId namespace id
+     * @param serviceName service name
+     * @param clusterName cluster name
+     * @param page        number of page
+     * @param pageSize    size of each page
+     * @return instances information
+     * @throws NacosException nacos exception
+     */
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.READ)
+    @RequestMapping(value = "/instances")
+    public ObjectNode instanceList(@RequestParam(defaultValue = Constants.DEFAULT_NAMESPACE_ID) String namespaceId,
+                                   @RequestParam String serviceName, @RequestParam String clusterName, @RequestParam(name = "pageNo") int page,
+                                   @RequestParam int pageSize) throws NacosException {
 
         Service service = serviceManager.getService(namespaceId, serviceName);
         if (service == null) {
@@ -132,30 +182,269 @@ public class CatalogController {
             end = instances.size();
         }
 
-        JSONObject result = new JSONObject();
-        result.put("list", instances.subList(start, end));
+        ObjectNode result = JacksonUtils.createEmptyJsonNode();
+        result.replace("list", JacksonUtils.transferToJsonNode(instances.subList(start, end)));
         result.put("count", instances.size());
 
         return result;
     }
 
-    @RequestMapping(value = "/services", method = RequestMethod.GET)
-    public Object listDetail(HttpServletRequest request) {
+    /**
+     * List service information contains publisher and subscriber.
+     *
+     * @param namespaceId namespace id
+     * @param pageNo      number of page
+     * @param pageSize    size of each page
+     * @return list pubInfo and subInfo
+     */
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.READ)
+    @GetMapping("/serviceinfos")
+    public PageResult<ServiceInfoModel> listServiceInfo(@RequestParam(required = false, defaultValue = "0") long modifiedTime,
+                                                        @RequestParam(required = false, defaultValue = "0") long recentMills,
+                                                        @RequestParam(defaultValue = Constants.DEFAULT_NAMESPACE_ID) String namespaceId,
+                                                        @RequestParam(required = false, defaultValue = "1") int pageNo,
+                                                        @RequestParam(required = false, defaultValue = "20") int pageSize) {
 
-        boolean withInstances = Boolean.parseBoolean(WebUtils.optional(request, "withInstances", "true"));
+
+        Map<String, Service> serviceMap = serviceManager.getServiceMap(namespaceId);
+        if (null == serviceMap) {
+            return null;
+        }
+
+        // 按照时间过滤，返回过滤后的数据。（增量同步时传递此字段）
+        if (modifiedTime > 0 || recentMills > 0) {
+            List<ServiceInfoModel> infoModels = listByModifiedTime(modifiedTime, recentMills, serviceMap);
+            return PageResult.result(infoModels);
+        }
+
+        // 分页查询 (全量同步数据)
+        List<ServiceInfoModel> infoModels = listServiceByPage(serviceMap, pageNo, pageSize);
+        return PageResult.success(pageNo, pageSize, serviceMap.size(), infoModels);
+    }
+
+
+    /**
+     * List subscriber instance.
+     *
+     * @return all subscriber instance
+     */
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.READ)
+    @GetMapping("/subInstances")
+    public ClientInfoVO listSubInstances() {
+        return getClientInfo();
+    }
+
+    private ClientInfoVO getClientInfo() {
+        ClientInfoVO clientInfoVO = new ClientInfoVO();
+        List<ClientInfos> clientInfos = Lists.newArrayList();
+        ConcurrentMap<String, ConcurrentMap<String, PushService.PushClient>> clientMap = pushService.getClientMap();
+        clientMap.forEach((serviceName, pubClients) -> {
+            ClientInfos infos = new ClientInfos();
+            infos.setServiceName(serviceName.split("##")[1]);
+            List<PushClient> pushClients = BeanUtils.copyList(PushClient.class, pubClients.values());
+
+            infos.setPushClients(Sets.newHashSet(pushClients));
+            clientInfos.add(infos);
+        });
+        clientInfoVO.setClientInfos(clientInfos);
+        return clientInfoVO;
+    }
+
+
+    private List<ServiceInfoModel> listServiceByPage(Map<String, Service> serviceMap, int pageNo, int pageSize) {
+        if (pageNo < 1) {
+            pageNo = 1;
+        }
+        if (pageSize < 1) {
+            pageSize = 20;
+        }
+        List<ServiceInfoModel> infoModels = Lists.newArrayList();
+
+        //
+        Map<String, Set<PushClient>> pubClientMap = queryAllSubscribers();
+
+        serviceMap.values().stream().skip((pageNo - 1) * pageSize).limit(pageSize).forEach(service -> {
+            ServiceInfoModel infoModel = new ServiceInfoModel();
+            List<ServiceSubInfo> subInfos = getSubscribers(service.getName(), pubClientMap);
+            List<ServicePubInfo> pubInfos = getServicePubInfos(service);
+
+            infoModel.setServiceName(service.getName().split("@@")[1]);
+            infoModel.setPubInfos(pubInfos);
+            infoModel.setSubInfos(subInfos);
+            infoModels.add(infoModel);
+        });
+        return infoModels;
+    }
+
+    private Map<String, Set<PushClient>> queryAllSubscribers() {
+        // 查询出所有节点
+        List<String> healthyList = Lists.newArrayList(distroMapper.getHealthyList());
+        if (CollectionUtils.isEmpty(healthyList)) {
+            return Maps.newHashMap();
+        }
+        Map<String, Set<PushClient>> pubClientMap = Maps.newHashMap();
+        // 本节点的客户端信息添加到map里
+        ClientInfoVO clientInfo = getClientInfo();
+        if (CollectionUtils.isNotEmpty(clientInfo.getClientInfos())) {
+            addToMap(pubClientMap, clientInfo);
+        }
+
+        addRemoteSubInfoToMap(healthyList, pubClientMap);
+        return pubClientMap;
+    }
+
+    private void addRemoteSubInfoToMap(List<String> healthyList, Map<String, Set<PushClient>> pubClientMap) {
+        Integer port = ApplicationUtils.getProperty("server.port", Integer.class, 8848);
+        String localAddress = InetUtils.getSelfIp() + ":" + port;
+        healthyList.remove(localAddress);
+        for (String otherHealthyNode : healthyList) {
+            String url = "http://" + otherHealthyNode + "/nacos/v1/ns/catalog/subInstances";
+            try {
+                HttpRestResult<String> result = NACOS_REST_TEMPLATE.get(url, Header.EMPTY, Query.EMPTY, String.class);
+                ClientInfoVO clientInfoVO = mapper.readValue(result.getData(), ClientInfoVO.class);
+                if (CollectionUtils.isEmpty(clientInfoVO.getClientInfos())) {
+                    continue;
+                }
+                addToMap(pubClientMap, clientInfoVO);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void addToMap(Map<String, Set<PushClient>> pubClientMap, ClientInfoVO clientInfo) {
+        Map<String, Set<PushClient>> collect = clientInfo.getClientInfos().stream().collect(Collectors.toMap(ClientInfos::getServiceName, ClientInfos::getPushClients));
+        collect.forEach((serviceName, clients) -> {
+            Set<PushClient> pushClients = pubClientMap.get(serviceName);
+            if (CollectionUtils.isEmpty(pushClients)) {
+                pushClients = Sets.newHashSet(clients);
+                pubClientMap.put(serviceName, pushClients);
+            } else {
+                pushClients.addAll(clients);
+            }
+        });
+    }
+
+    private List<ServiceSubInfo> getSubscribers(String serviceName, Map<String, Set<PushClient>> pubClientMap) {
+        Set<PushClient> pushClients = pubClientMap.get(serviceName);
+        if (CollectionUtils.isEmpty(pushClients)) {
+            return Lists.newArrayList();
+        }
+        List<ServiceSubInfo> subInfos = Lists.newArrayList();
+        for (PushClient pushClient : pushClients) {
+            ServiceSubInfo subInfo = new ServiceSubInfo();
+            subInfo.setInstanceId(pushClient.getClusters());
+            subInfo.setAppName(pushClient.getApp());
+            String hostAddress = pushClient.getSocketAddr().getAddress().getHostAddress();
+            subInfo.setHostIp(hostAddress);
+            subInfo.setProcessId(hostAddress + ":" + pushClient.getSocketAddr().getPort());
+            subInfo.setDataId(pushClient.getServiceName().split("@@")[1]);
+            subInfos.add(subInfo);
+        }
+        return subInfos;
+    }
+
+    private List<ServiceSubInfo> getSubInfos(Service service) {
+        List<ServiceSubInfo> subInfos = Lists.newArrayList();
+        List<Subscriber> clientsFuzzy = subscribeManager.getSubscribersFuzzy(service.getName(), service.getNamespaceId());
+        if (CollectionUtils.isNotEmpty(clientsFuzzy)) {
+            for (Subscriber subscriber : clientsFuzzy) {
+                ServiceSubInfo subInfo = new ServiceSubInfo();
+                subInfo.setInstanceId(subscriber.getCluster());
+                subInfo.setAppName(subscriber.getApp());
+                subInfo.setHostIp(subscriber.getIp());
+                subInfo.setProcessId(subscriber.getIp() + ":" + subscriber.getPort());
+                subInfo.setDataId(subscriber.getServiceName().split("@@")[1]);
+                subInfos.add(subInfo);
+            }
+        }
+        return subInfos;
+    }
+
+    private List<ServiceInfoModel> listByModifiedTime(long modifiedTime, long recentTime, Map<String, Service> serviceMap) {
+        List<ServiceInfoModel> infoModels = Lists.newArrayList();
+        if (recentTime > 0) {
+            modifiedTime = System.currentTimeMillis() - recentTime;
+        }
+        Map<String, Set<PushClient>> pubClientMap = queryAllSubscribers();
+        long finalModifiedTime = modifiedTime;
+        serviceMap.values().stream()
+            .filter(service -> service.getLastModifiedMillis() > finalModifiedTime
+                || service.getSubscriberModifiedMills() > finalModifiedTime)
+            .forEach(service -> {
+                ServiceInfoModel infoModel = new ServiceInfoModel();
+                List<ServiceSubInfo> subInfos = getSubscribers(service.getName(), pubClientMap);
+
+                List<ServicePubInfo> pubInfos = getServicePubInfos(service);
+
+                infoModel.setServiceName(service.getName().split("@@")[1]);
+                infoModel.setPubInfos(pubInfos);
+                infoModel.setSubInfos(subInfos);
+                infoModels.add(infoModel);
+            });
+        return infoModels;
+    }
+
+    private List<ServicePubInfo> getServicePubInfos(Service service) {
+        List<ServicePubInfo> pubInfos = Lists.newArrayList();
+        for (com.alibaba.nacos.naming.core.Cluster cluster : service.getClusterMap().values()) {
+            cluster.getEphemeralInstances().forEach(instance -> addToPubInfos(pubInfos, instance));
+            cluster.getPersistentInstances().forEach(instance -> addToPubInfos(pubInfos, instance));
+        }
+        return pubInfos;
+    }
+
+    private void addToPubInfos(List<ServicePubInfo> pubInfos, Instance instance) {
+        ServicePubInfo pubInfo = new ServicePubInfo();
+        String appName = instance.getApp();
+        String ip = instance.getIp();
+        Map<String, String> metadata = instance.getMetadata();
+        pubInfo.setAppName(appName);
+        pubInfo.setInstanceId(instance.getClusterName());
+        pubInfo.setServiceIp(ip);
+        pubInfo.setServicePort(instance.getPort());
+        pubInfo.setProcessId(ip + ":" + instance.getPort());
+        String pubData = metadata.get("pubData");
+        pubInfo.setContent(pubData);
+        pubInfo.setDataId(instance.getServiceName().split("@@")[1]);
+        pubInfo.setWeight(Double.valueOf(instance.getWeight() * 10).intValue());
+        pubInfos.add(pubInfo);
+    }
+
+
+    /**
+     * List service detail information.
+     *
+     * @param withInstances     whether return instances
+     * @param namespaceId       namespace id
+     * @param pageNo            number of page
+     * @param pageSize          size of each page
+     * @param serviceName       service name
+     * @param groupName         group name
+     * @param containedInstance instance name pattern which will be contained in detail
+     * @param hasIpCount        whether filter services with empty instance
+     * @return list service detail
+     */
+    @Secured(parser = NamingResourceParser.class, action = ActionTypes.READ)
+    @GetMapping("/services")
+    public Object listDetail(@RequestParam(required = false) boolean withInstances,
+                             @RequestParam(defaultValue = Constants.DEFAULT_NAMESPACE_ID) String namespaceId,
+                             @RequestParam(required = false) int pageNo, @RequestParam(required = false) int pageSize,
+                             @RequestParam(name = "serviceNameParam", defaultValue = StringUtils.EMPTY) String serviceName,
+                             @RequestParam(name = "groupNameParam", defaultValue = StringUtils.EMPTY) String groupName,
+                             @RequestParam(name = "instance", defaultValue = StringUtils.EMPTY) String containedInstance,
+                             @RequestParam(required = false) boolean hasIpCount) {
+
+        String param = StringUtils.isBlank(serviceName) && StringUtils.isBlank(groupName) ? StringUtils.EMPTY
+            : NamingUtils.getGroupedName(serviceName, groupName);
 
         if (withInstances) {
-            String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID,
-                Constants.DEFAULT_NAMESPACE_ID);
             List<ServiceDetailInfo> serviceDetailInfoList = new ArrayList<>();
-            int pageNo = Integer.parseInt(WebUtils.required(request, "pageNo"));
-            int pageSize = Integer.parseInt(WebUtils.required(request, "pageSize"));
-            String keyword = WebUtils.optional(request, "keyword", StringUtils.EMPTY);
 
-            List<Service> serviceList = new ArrayList<>(8);
-            serviceManager.getPagedService(namespaceId, pageNo, pageSize, keyword, StringUtils.EMPTY, serviceList);
+            List<Service> services = new ArrayList<>(8);
+            serviceManager.getPagedService(namespaceId, pageNo, pageSize, param, StringUtils.EMPTY, services, false);
 
-            for (Service service : serviceList) {
+            for (Service service : services) {
                 ServiceDetailInfo serviceDetailInfo = new ServiceDetailInfo();
                 serviceDetailInfo.setServiceName(NamingUtils.getServiceName(service.getName()));
                 serviceDetailInfo.setGroupName(NamingUtils.getGroupName(service.getName()));
@@ -168,16 +457,46 @@ public class CatalogController {
             }
 
             return serviceDetailInfoList;
-        } else {
-            return serviceList(request);
         }
+
+        ObjectNode result = JacksonUtils.createEmptyJsonNode();
+
+        List<Service> services = new ArrayList<>();
+        final int total = serviceManager.getPagedService(namespaceId, pageNo - 1, pageSize, param, containedInstance, services, hasIpCount);
+        if (CollectionUtils.isEmpty(services)) {
+            result.replace("serviceList", JacksonUtils.transferToJsonNode(Collections.emptyList()));
+            result.put("count", 0);
+            return result;
+        }
+
+        List<ServiceView> serviceViews = new LinkedList<>();
+        for (Service service : services) {
+            ServiceView serviceView = new ServiceView();
+            serviceView.setName(NamingUtils.getServiceName(service.getName()));
+            serviceView.setGroupName(NamingUtils.getGroupName(service.getName()));
+            serviceView.setClusterCount(service.getClusterMap().size());
+            serviceView.setIpCount(service.allIPs().size());
+            serviceView.setHealthyInstanceCount(service.healthyInstanceCount());
+            serviceView.setTriggerFlag(service.triggerFlag() ? "true" : "false");
+            serviceViews.add(serviceView);
+        }
+
+        result.replace("serviceList", JacksonUtils.transferToJsonNode(serviceViews));
+        result.put("count", total);
+
+        return result;
     }
 
+    /**
+     * Get response time of service.
+     *
+     * @param request http request
+     * @return response time information
+     */
     @RequestMapping("/rt/service")
-    public JSONObject rt4Service(HttpServletRequest request) {
+    public ObjectNode rt4Service(HttpServletRequest request) {
 
-        String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID,
-            Constants.DEFAULT_NAMESPACE_ID);
+        String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID, Constants.DEFAULT_NAMESPACE_ID);
 
         String serviceName = WebUtils.required(request, CommonParams.SERVICE_NAME);
 
@@ -186,33 +505,26 @@ public class CatalogController {
             throw new IllegalArgumentException("request service doesn't exist");
         }
 
-        JSONObject result = new JSONObject();
+        ObjectNode result = JacksonUtils.createEmptyJsonNode();
 
-        JSONArray clusters = new JSONArray();
+        ArrayNode clusters = JacksonUtils.createEmptyArrayNode();
         for (Map.Entry<String, com.alibaba.nacos.naming.core.Cluster> entry : service.getClusterMap().entrySet()) {
-            JSONObject packet = new JSONObject();
+            ObjectNode packet = JacksonUtils.createEmptyJsonNode();
             HealthCheckTask task = entry.getValue().getHealthCheckTask();
 
             packet.put("name", entry.getKey());
-            packet.put("checkRTBest", task.getCheckRTBest());
-            packet.put("checkRTWorst", task.getCheckRTWorst());
-            packet.put("checkRTNormalized", task.getCheckRTNormalized());
+            packet.put("checkRTBest", task.getCheckRtBest());
+            packet.put("checkRTWorst", task.getCheckRtWorst());
+            packet.put("checkRTNormalized", task.getCheckRtNormalized());
 
             clusters.add(packet);
         }
-        result.put("clusters", clusters);
-
+        result.replace("clusters", clusters);
         return result;
     }
 
-    /**
-     * getStringClusterInfoMap
-     *
-     * @param service
-     * @return
-     */
     private Map<String, ClusterInfo> getStringClusterInfoMap(Service service) {
-        Map<String, ClusterInfo> clusterInfoMap = new HashedMap();
+        Map<String, ClusterInfo> clusterInfoMap = new HashMap<>(8);
 
         service.getClusterMap().forEach((clusterName, cluster) -> {
 
@@ -225,12 +537,6 @@ public class CatalogController {
         return clusterInfoMap;
     }
 
-    /**
-     * getIpAddressInfos
-     *
-     * @param instances
-     * @return
-     */
     private List<IpAddressInfo> getIpAddressInfos(List<Instance> instances) {
         List<IpAddressInfo> ipAddressInfos = new ArrayList<>();
 
@@ -247,54 +553,6 @@ public class CatalogController {
 
         });
         return ipAddressInfos;
-    }
-
-    private JSONObject serviceList(HttpServletRequest request) {
-
-        String namespaceId = WebUtils.optional(request, CommonParams.NAMESPACE_ID,
-            Constants.DEFAULT_NAMESPACE_ID);
-        JSONObject result = new JSONObject();
-
-        int page = Integer.parseInt(WebUtils.required(request, "pageNo"));
-        int pageSize = Integer.parseInt(WebUtils.required(request, "pageSize"));
-        String keyword = WebUtils.optional(request, "keyword", StringUtils.EMPTY);
-        String containedInstance = WebUtils.optional(request, "instance", StringUtils.EMPTY);
-
-        List<Service> services = new ArrayList<>();
-        int total = serviceManager.getPagedService(namespaceId, page - 1, pageSize, keyword, containedInstance, services);
-
-        if (CollectionUtils.isEmpty(services)) {
-            result.put("serviceList", Collections.emptyList());
-            result.put("count", 0);
-            return result;
-        }
-
-        JSONArray serviceJsonArray = new JSONArray();
-        for (Service service : services) {
-            ServiceView serviceView = new ServiceView();
-            serviceView.setName(NamingUtils.getServiceName(service.getName()));
-            serviceView.setGroupName(NamingUtils.getGroupName(service.getName()));
-            serviceView.setClusterCount(service.getClusterMap().size());
-            serviceView.setIpCount(service.allIPs().size());
-
-            // FIXME should be optimized:
-            int validCount = 0;
-            for (Instance instance : service.allIPs()) {
-                if (instance.isHealthy()) {
-                    validCount++;
-                }
-
-            }
-
-            serviceView.setHealthyInstanceCount(validCount);
-
-            serviceJsonArray.add(serviceView);
-        }
-
-        result.put("serviceList", serviceJsonArray);
-        result.put("count", total);
-
-        return result;
     }
 
 }

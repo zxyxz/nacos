@@ -13,14 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package com.alibaba.nacos.naming.pojo;
 
 import java.io.Serializable;
 import java.util.Objects;
 
 /**
+ * Subscriber.
+ *
  * @author nicholas
- * @version $Id: Subscriber.java, v 0.1 2019-05-28 下午10:47 nicholas Exp $$
  */
 public class Subscriber implements Serializable {
 
@@ -36,6 +38,10 @@ public class Subscriber implements Serializable {
 
     private String serviceName;
 
+    private String cluster;
+
+    private String port;
+
     public Subscriber(String addrStr, String agent, String app, String ip, String namespaceId, String serviceName) {
         this.addrStr = addrStr;
         this.agent = agent;
@@ -43,6 +49,33 @@ public class Subscriber implements Serializable {
         this.ip = ip;
         this.namespaceId = namespaceId;
         this.serviceName = serviceName;
+    }
+
+    public Subscriber(String addrStr, String agent, String app, String ip, String namespaceId, String serviceName, String cluster, String port) {
+        this.addrStr = addrStr;
+        this.agent = agent;
+        this.app = app;
+        this.ip = ip;
+        this.namespaceId = namespaceId;
+        this.serviceName = serviceName;
+        this.cluster = cluster;
+        this.port = port;
+    }
+
+    public String getPort() {
+        return port;
+    }
+
+    public void setPort(String port) {
+        this.port = port;
+    }
+
+    public String getCluster() {
+        return cluster;
+    }
+
+    public void setCluster(String cluster) {
+        this.cluster = cluster;
     }
 
     public String getAddrStr() {
@@ -102,12 +135,9 @@ public class Subscriber implements Serializable {
             return false;
         }
         Subscriber that = (Subscriber) o;
-        return Objects.equals(addrStr, that.addrStr) &&
-            Objects.equals(agent, that.agent) &&
-            Objects.equals(app, that.app) &&
-            Objects.equals(ip, that.ip) &&
-            Objects.equals(namespaceId, that.namespaceId) &&
-            Objects.equals(serviceName, that.serviceName);
+        return Objects.equals(addrStr, that.addrStr) && Objects.equals(agent, that.agent) && Objects
+                .equals(app, that.app) && Objects.equals(ip, that.ip) && Objects.equals(namespaceId, that.namespaceId)
+                && Objects.equals(serviceName, that.serviceName);
     }
 
     @Override
@@ -117,13 +147,8 @@ public class Subscriber implements Serializable {
 
     @Override
     public String toString() {
-        return "Subscriber{" +
-            "addrStr='" + addrStr + '\'' +
-            ", agent='" + agent + '\'' +
-            ", app='" + app + '\'' +
-            ", ip='" + ip + '\'' +
-            ", namespaceId='" + namespaceId + '\'' +
-            ", serviceName='" + serviceName + '\'' +
-            '}';
+        return "Subscriber{" + "addrStr='" + addrStr + '\'' + ", agent='" + agent + '\'' + ", app='" + app + '\''
+                + ", ip='" + ip + '\'' + ", namespaceId='" + namespaceId + '\'' + ", serviceName='" + serviceName + '\''
+                + '}';
     }
 }
