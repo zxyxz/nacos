@@ -28,29 +28,22 @@ import com.alibaba.nacos.naming.consistency.KeyBuilder;
 import com.alibaba.nacos.naming.consistency.RecordListener;
 import com.alibaba.nacos.naming.consistency.persistent.raft.RaftPeer;
 import com.alibaba.nacos.naming.consistency.persistent.raft.RaftPeerSet;
-import com.alibaba.nacos.naming.misc.GlobalExecutor;
-import com.alibaba.nacos.naming.misc.Loggers;
-import com.alibaba.nacos.naming.misc.Message;
-import com.alibaba.nacos.naming.misc.NetUtils;
-import com.alibaba.nacos.naming.misc.ServiceStatusSynchronizer;
-import com.alibaba.nacos.naming.misc.SwitchDomain;
-import com.alibaba.nacos.naming.misc.Synchronizer;
-import com.alibaba.nacos.naming.misc.UtilsAndCommons;
+import com.alibaba.nacos.naming.misc.*;
 import com.alibaba.nacos.naming.pojo.IpAppInfo;
 import com.alibaba.nacos.naming.pojo.ServiceAppInfo;
 import com.alibaba.nacos.naming.push.PushService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.google.common.collect.Sets;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.StringJoiner;
+import javax.annotation.PostConstruct;
+import javax.annotation.Resource;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.LinkedBlockingDeque;
@@ -59,13 +52,6 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import javax.annotation.PostConstruct;
-import javax.annotation.Resource;
-import org.apache.commons.lang3.ArrayUtils;
-import org.apache.commons.lang3.StringUtils;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
-import org.springframework.util.CollectionUtils;
 
 import static com.alibaba.nacos.api.common.Constants.NULL_STRING;
 
@@ -801,20 +787,9 @@ public class ServiceManager implements RecordListener<Service> {
         //根据clusterName,namespaceId,groupName从clientMap筛选出一批client
         List<PushService.PushClient> collect = getAllPushClient(namespaceId, groupName, instanceId, "");
         Set<String> firstServers = new HashSet<>();
-        Set<String> twoServers = new HashSet<>();
-        //拿到client订阅了多少的服务
-        collect.forEach(pushClient -> firstServers.add(getServiceName(pushClient.getServiceName())));
-        //初步查询serverMap
-        List<Instance> allInstance = getAllInstance(namespaceId, groupName, instanceId, appName, "", false);
-        //allInstance的所有服务和collect推的所有服务，取交集
-        firstServers.forEach(s -> {
-            allInstance.forEach(instance -> {
-                if (getServiceName(instance.getServiceName()).equals(s)) {
-                    twoServers.add(s);
-                }
-            });
-        });
-        resultMap.put("servers", twoServers);
+        //拿到指定app的client订阅了多少的服务
+        collect.stream().filter(x-> appName.equals(x.getApp())).forEach(pushClient -> firstServers.add(getServiceName(pushClient.getServiceName())));
+        resultMap.put("servers", firstServers);
         return resultMap;
     }
     public HashMap<String, Object> getServicesServerList(String instanceId, String appName, String groupName, String namespaceId) {
@@ -841,17 +816,10 @@ public class ServiceManager implements RecordListener<Service> {
         List<Map<String, Object>> resultList = new ArrayList<>();
         //根据instanceId,serviceName,groupName,namespaceId筛选一遍client
         List<PushService.PushClient> collect = getAllPushClient(namespaceId, groupName, instanceId, serviceName);
-        //初步查询serverMap，根据serviceName进行筛选
-        List<Instance> allInstance = getAllInstance(namespaceId, groupName, instanceId, "", serviceName, false);
         Set<IpAppInfo> result = new HashSet<>();
         //每一个client都要找到对应service下，所有存在的appName
         collect.forEach(pushClient -> {
-            allInstance.forEach(instance -> {
-                //根据instanceId,serviceName是否匹配即可判断
-                if (pushClient.getClusters().equals(instance.getClusterName()) && pushClient.getServiceName().equals(instance.getServiceName())) {
-                    result.add(new IpAppInfo(pushClient.getIp(), StringUtils.isBlank(pushClient.getApp())?getAppName(instance):pushClient.getApp()));
-                }
-            });
+            result.add(new IpAppInfo(pushClient.getIp(), pushClient.getApp()));
         });
         result.forEach(s -> {
             Map index = new HashMap();
