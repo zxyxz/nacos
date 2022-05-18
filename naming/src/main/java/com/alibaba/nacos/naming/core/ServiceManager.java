@@ -758,7 +758,9 @@ public class ServiceManager implements RecordListener<Service> {
                 index.put("serviceName", instance.getServiceName());
                 index.put("pubApp", instance.getAppName());
                 index.put("pubCount", getAllInstance(namespaceId, groupName, instanceId, instance.getAppName(), instance.getServiceName(), false).size());
-                index.put("subCount", getAllPushClient(namespaceId, groupName, instanceId, instance.getServiceName()).size());
+                List<PushService.PushClient> pushClientList = getAllPushClient(namespaceId, groupName, instanceId, instance.getServiceName());
+                Set<String> subList = pushClientList.stream().map(x -> String.join("|",x.getApp(),x.getIp())).collect(Collectors.toSet());
+                index.put("subList", subList);
                 resultList.add(index);
             });
         resultMap.put("list", resultList);
