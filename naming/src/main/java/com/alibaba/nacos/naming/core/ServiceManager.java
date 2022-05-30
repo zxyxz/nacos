@@ -751,7 +751,7 @@ public class ServiceManager implements RecordListener<Service> {
         Set<ServiceAppInfo> result = new HashSet<>();
         allInstance.forEach(instance -> result.add(new ServiceAppInfo(getServiceName(instance.getServiceName()), getAppName(instance))));
         //分页
-        result.stream().skip((pageNo - 1) * pageSize)
+        result.stream().sorted(Comparator.comparing(ServiceAppInfo::getServiceName)).skip((pageNo - 1) * pageSize)
             .limit(pageSize)
             .forEach(instance -> {
                 Map index = new HashMap();
@@ -759,6 +759,7 @@ public class ServiceManager implements RecordListener<Service> {
                 index.put("pubApp", instance.getAppName());
                 index.put("pubCount", getAllInstance(namespaceId, groupName, instanceId, instance.getAppName(), instance.getServiceName(), false).size());
                 List<PushService.PushClient> pushClientList = getAllPushClient(namespaceId, groupName, instanceId, instance.getServiceName());
+                index.put("subCount", pushClientList.size());
                 Set<String> subList = pushClientList.stream().map(x -> String.join("|",x.getApp(),x.getIp())).collect(Collectors.toSet());
                 index.put("subList", subList);
                 resultList.add(index);
